@@ -95,12 +95,15 @@ def extract_features( input_dir , training_flag = False ):
                         count_nonletter += 1
                         continue #check the next token if the token contains a number
 
-                if count_up == count_tokens - count_nonletter:
-                    all_up = True
-                if count_tit == count_tokens - count_nonletter:
-                    all_tit = True
-                if count_verb > 0:
-                    contain_verb = True
+                if count_tokens == count_nonletter:
+                    all_up, all_tit, contain_verb = False, False, False
+                else:
+                    if count_up == count_tokens - count_nonletter:
+                        all_up = True
+                    if count_tit == count_tokens - count_nonletter:
+                        all_tit = True
+                    if count_verb > 0:
+                        contain_verb = True
 
                 ## FEATURE: end with a colon
                 ending_symbols = sent.text[-2:]
