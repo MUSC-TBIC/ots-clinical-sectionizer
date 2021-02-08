@@ -4,3 +4,5 @@ medspacy
 dkpro-cassis
 pandas
 sklearn
+pickle-mixin
+dkpro-cassis

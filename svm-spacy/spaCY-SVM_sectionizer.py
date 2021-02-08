@@ -4,14 +4,15 @@ import glob
 import re
 
 import spacy as spacy
+import cassis
 
 import pandas as pd
 
 import pickle
 
 from sklearn import svm
-from sklearn import metrics
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.metrics import classification_report
 
 from tqdm import tqdm
 
@@ -38,7 +39,7 @@ def check_header( index , header_idx ):
     return in_range
 
 
-def extract_features( input_dir, output_dir , training_flag = False ):
+def extract_features( input_dir , training_flag = False ):
     ## Load an clinical English medspaCy model trained on i2b2 data
     ## - https://github.com/medspacy/sectionizer/blob/master/notebooks/00-clinical_sectionizer.ipynb
     nlp = spacy.load('en_info_3700_i2b2_2012')
@@ -66,11 +67,10 @@ def extract_features( input_dir, output_dir , training_flag = False ):
             sentences = list(processed_notes.sents)
 
             # get features
-            doc_len = len(
-                processed_notes)
+            doc_len = len(processed_notes) # number of tokens
             span_end = 0
             end_idx = 0
-            sent_count_i = 0
+
             for sent_i, sent in enumerate(sentences):
                 # count by tokens
                 len_bytokens = sent.__len__()
@@ -80,21 +80,27 @@ def extract_features( input_dir, output_dir , training_flag = False ):
 
                 ## FEATURE: capitalization type. all-upper case, title case, or others.
                 ## FEATURE: containing a verb
-                token_i = 0
-                all_up, all_tit = True, True
-                contain_verb = False
-                while (all_up or all_tit) and not contain_verb and token_i < len_bytokens:
-                    token = sent[token_i]
-                    token_i += 1
-                    if re.search('[a-z]|[A-Z]', token.text) and not re.search('[0-9]', token.text): # if the token contains letters and no numbers
-                        if not token.text.isupper():
-                            all_up = False
-                        if not token.text.istitle():
-                            all_tit = False
+                all_up, all_tit, contain_verb = False, False, False
+                count_tokens, count_nonletter, count_up, count_tit, count_verb = 0, 0, 0, 0, 0
+                for token in sent:
+                    count_tokens += 1
+                    if re.search('[a-z]|[A-Z]', token.text) and not re.search('[0-9]', token.text):
+                        if token.text.isupper():
+                            count_up += 1
+                        if token.text.istitle():
+                            count_tit += 1
                         if token.pos_ == "VERB":
-                            contain_verb = True
+                            count_verb += 1
                     else:
-                        continue
+                        count_nonletter += 1
+                        continue #check the next token if the token contains a number
+
+                if count_up == count_tokens - count_nonletter:
+                    all_up = True
+                if count_tit == count_tokens - count_nonletter:
+                    all_tit = True
+                if count_verb > 0:
+                    contain_verb = True
 
                 ## FEATURE: end with a colon
                 ending_symbols = sent.text[-2:]
@@ -103,7 +109,6 @@ def extract_features( input_dir, output_dir , training_flag = False ):
                 else:
                     ending_colon = False
 
-                ## FEATURE: probably wrongly sentencized
                 # check if is a header
                 sent_len = len(sent.text_with_ws)
                 end_idx += sent_len # end_idx = index of the ending character + 1
@@ -128,14 +133,13 @@ def extract_features( input_dir, output_dir , training_flag = False ):
                                         'wrongly_sentencized': [wrongly_sentencized], 'header': [is_header],
                                         'filename': [filename], 'idx1': [start_idx], 'idx2': [end_idx-1], 'content': [sent.text_with_ws]})
                 features = features.append(feature)
-                ## exact header match
 
-    # pre-process the dataframe
+    # adjust the datatype
     for column in features:
         if column not in ["percentile",'filename','idx1','idx2','content']:
-            #    features_binary = normalize(features_binary['percentile'], axis=0)
-            # else:
             features[column] = features[column].astype(bool)
+        if column in ['idx1', 'idx2']:
+            features[column] = features[column].astype(int)
 
     # SVM
     raw_features = features.drop( 'header' , axis=1 )
@@ -149,83 +153,126 @@ def extract_features( input_dir, output_dir , training_flag = False ):
 def clean_up_features( raw_features , keep_filename = False ):
     # convert to binary predictors. No need to normalize the continous variable 'percentile'
     if( keep_filename ):
-        features_clean = raw_features.drop( [ 'idx1', 'idx2','content'], axis=1).dropna(axis=0)
+        features_clean = raw_features.drop( [ 'idx1', 'idx2','content', 'wrongly_sentencized'], axis=1).dropna(axis=0)
     else:
-        features_clean = raw_features.drop( ['filename', 'idx1', 'idx2','content'], axis=1).dropna(axis=0)
+        features_clean = raw_features.drop( ['filename', 'idx1', 'idx2','content', 'wrongly_sentencized'], axis=1).dropna(axis=0)
     return( features_clean )
 
 
-def train( input_dir, output_dir , model_dir ):
-    raw_features , target = extract_features( input_dir, output_dir , training_flag = True )
+def write_xmi(raw_features, y_pred, output_dir):
+    df = raw_features
+    df["isHeader"] = y_pred
+
+    typesystem = cassis.TypeSystem()
+    SentAnnotation = typesystem.create_type( name = 'TBD.SentenceAnnotation')
+    typesystem.add_feature( type_ = SentAnnotation,
+                            name = 'text',
+                            rangeTypeName= 'uima.cas.String')
+    typesystem.add_feature( type_ = SentAnnotation ,
+                            name = 'isHeader' ,
+                            description= 'If the sentence is a header or not',
+                            rangeTypeName = 'uima.cas.Boolean' )
+
+    ## Iterate over the files, covert to CAS, and write the XMI to disk
+    filenames = df["filename"].unique()
+    for filename in filenames:
+        df_byfilename = raw_features[raw_features["filename"]==filename]
+
+        cas = cassis.Cas(typesystem=typesystem)
+        cas.sofa_mime = "text/plain"
+        s = ""
+        cas.sofa_string = s.join(df_byfilename["content"].tolist())
+        for i in range(len(df_byfilename)):
+            cas.add_annotation(SentAnnotation(begin=df_byfilename["idx1"].iloc[i],
+                                           end=df_byfilename["idx2"].iloc[i],
+                                           text=df_byfilename["content"].iloc[i],
+                                           isHeader=df_byfilename['isHeader'].iloc[i]))
+        # write CAS XMI
+        xmi_filename = re.sub('.txt$', '.xmi', filename)
+        cas.to_xmi(path=os.path.join(output_dir, xmi_filename), pretty_print=True)
+
+
+def train( input_dir, output_dir , model_dir, svm_kernel):
+    raw_features , target = extract_features( input_dir, training_flag = True )
+    predictors = clean_up_features( raw_features )
 
     # write the pd.df as a .csv
+    raw_features['isHeader'] = target
     raw_features.to_csv( os.path.join( output_dir , "raw_processed_dataset.csv" ) ,
                          index = True )
-    
-    predictors = clean_up_features( raw_features )
     
     x_train, x_test, y_train, y_test = train_test_split(predictors, target, test_size=0.3, random_state=444)
     
     # create a classifier
-    ## TODO - make the kernal a passable argument so you can provide
-    ##        something like --svm-kernel "linear" / --svm-kernel "rbf"
-    ##        as a command line argument
-    clf = svm.SVC(kernel='linear')
-    # train the model using the training sets
-    clf.fit(x_train, y_train)
+    if svm_kernel == 'linear':
+        model = svm.SVC(kernel='linear')
+        model.fit(x_train, y_train)
+        print("Linear kernel")
+    elif svm_kernel == 'rbf':
+        param_grid = {'C': [0.1, 1, 10, 100, 1000],
+                      'gamma': [1, 0.1, 0.01, 0.001, 0.0001],
+                      'kernel': ['rbf']}
+        model = GridSearchCV(svm.SVC(), param_grid, refit=True, verbose=3)
+        model.fit(x_train, y_train)
+        print("Best parameters for RBF SVM:")
+        print(model.best_params_)
+
+
     ## Save the model to disk
     model_file = os.path.join( model_dir , 'svm_sectionizer.pkl' )
-    pickle.dump( clf , open( model_file , 'wb' ) )
+    pickle.dump( model , open( model_file , 'wb' ) )
     
-    y_pred = clf.predict(x_test)
-    accuracy = metrics.accuracy_score(y_test, y_pred)
-    precision = metrics.precision_score(y_test, y_pred)
-    recall = metrics.recall_score(y_test, y_pred)
-    f1 = metrics.f1_score(y_test, y_pred)
+    y_pred = model.predict(x_test)
+    print(classification_report(y_test, y_pred))
+    print("Training completed.")
 
-    print("Accuracy = ", accuracy,
-          "\nF1 = ", f1,
-          "\nPrecision = ", precision,
-          "\nRecall = ", recall)
-
-    # features: to create features, what spacy features can I use? (sentence boundary detection, pos, similarity ?, rule based matching?, text classification?)
-    # what features to use as predictors?
 
 
 def annotate( input_dir, output_dir , model_file ):
-    raw_features = extract_features( input_dir, output_dir , training_flag = False )
-
-    cleaned_features = clean_up_features( raw_features , keep_filename = True )
-    cleaned_features.to_csv( os.path.join( output_dir , "cleaned_processed_dataset.csv" ) ,
-                             index = False )
+    raw_features = extract_features( input_dir, training_flag = False )
     predictors = clean_up_features( raw_features , keep_filename = False )
     
     ## Load the model from disk
-    clf = pickle.load( open( model_file , 'rb' ) )
+    model = pickle.load( open( model_file , 'rb' ) )
     
-    y_pred = clf.predict( predictors )
+    y_pred = model.predict( predictors )
 
-    ## TODO - Iterate over the raw_features to write a CAS XMI file per filename
+    # write features and predicted values as a .csv
+    cleaned_features = clean_up_features( raw_features , keep_filename = True )
+    assert len(cleaned_features) == len(y_pred)
+    cleaned_features["pred_isHeader"] = y_pred
+    cleaned_features.to_csv( os.path.join( output_dir , "cleaned_processed_dataset.csv" ) ,
+                             index = False )
+
+    ## Write a CAS XMI file per filename
+    assert len(raw_features) == len(y_pred)
+    write_xmi(raw_features, y_pred, output_dir)
+    print("Annotation completed.")
 
 
-# Press the green button in the gutter to run the script.
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Clincial notes sectionizer based on spaCY basic pipeline and SVM')
     parser.add_argument( '-i' , '--input-dir' , required = True ,
                          dest = 'input_dir' ,
-                         help='Input directory containing plain text and .ann files to train and test the sectionizer')
+                         help='Input directory containing plain text (and .ann) files to train or to sectionize')
     parser.add_argument( '-o' , '--output-dir' , required = True ,
                          dest = 'output_dir',
-                        help='Output directory for writing the processed dataset to')
+                        help='Output directory for writing the processed dataset or CAS XMI files to')
     parser.add_argument( '--model-dir' , required = False ,
                          default = None ,
                          dest = 'model_dir',
                          help='Output directory for writing the model details' )
     parser.add_argument( '--train' ,
-                         dest = 'train' ,
-                         help = "Train a new model based on the input directory" ,
-                         action = "store_true" )
+                        dest = 'train' ,
+                        help = "Train a new model based on the input directory" ,
+                        action = "store_true" )
+    parser.add_argument('--svm-kernel',
+                         default = 'rbf',
+                         dest = 'svm_kernel',
+                         help = 'Specify the SVM kernel function. For example, "linear" or "rbf" (radial basis function)')
     args = parser.parse_args()
     if( not os.path.exists( args.output_dir ) ):
         os.mkdir( args.output_dir )
@@ -234,10 +281,10 @@ if __name__ == '__main__':
     if( args.train ):
         train( os.path.abspath( args.input_dir ) ,
                os.path.abspath( args.output_dir ) ,
-               os.path.abspath( args.model_dir ) )
+               os.path.abspath( args.model_dir ),
+               args.svm_kernel)
     else:
         annotate( os.path.abspath( args.input_dir ) ,
                   os.path.abspath( args.output_dir ) ,
                   os.path.join( os.path.abspath( args.model_dir ) ,
                                 'svm_sectionizer.pkl' ) )
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
