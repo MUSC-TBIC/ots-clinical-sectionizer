@@ -1,8 +1,8 @@
 tqdm
-spacy
+spacy==2.2.2
 medspacy
 dkpro-cassis
 pandas
 sklearn
 pickle-mixin
-dkpro-cassis
+dkpro-cassis==0.3.0
