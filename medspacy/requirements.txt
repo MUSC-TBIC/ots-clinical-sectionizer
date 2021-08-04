@@ -1,5 +1,8 @@
+Cython
+IPython
 tqdm
-spacy
+spacy==2.2.2
 medspacy
-dkpro-cassis
+https://github.com/abchapman93/spacy_models/raw/master/releases/en_info_3700_i2b2_2012-0.1.0/dist/en_info_3700_i2b2_2012-0.1.0.tar.gz
+dkpro-cassis==0.3.0
 
