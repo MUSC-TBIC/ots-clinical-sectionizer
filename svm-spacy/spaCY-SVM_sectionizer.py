@@ -162,34 +162,63 @@ def clean_up_features( raw_features , keep_filename = False ):
     return( features_clean )
 
 
-def write_xmi(raw_features, y_pred, output_dir):
+def write_xmi( raw_features , y_pred , output_dir , types_dir ):
     df = raw_features
     df["isHeader"] = y_pred
 
-    typesystem = cassis.TypeSystem()
-    SentAnnotation = typesystem.create_type( name = 'TBD.SentenceAnnotation')
-    typesystem.add_feature( type_ = SentAnnotation,
-                            name = 'text',
-                            rangeTypeName= 'uima.cas.String')
-    typesystem.add_feature( type_ = SentAnnotation ,
-                            name = 'isHeader' ,
-                            description= 'If the sentence is a header or not',
-                            rangeTypeName = 'uima.cas.Boolean' )
-
+    ## Create a type system for writing the sentences and headers to
+    ## disk starting with a SHARPn Sentence types
+    with open( os.path.join( types_dir , 'Sentence.xml' ) , 'rb' ) as fp:
+        typesystem = cassis.load_typesystem( fp )
+    SentenceAnnotation = typesystem.get_type( 'org.apache.ctakes.typesystem.type.textspan.Sentence' )
+    ############
+    ## ... for sections (and, by association, section headers)
+    NoteSection = typesystem.create_type( name = 'edu.musc.tbic.uima.NoteSection' ,
+                                          supertypeName = 'uima.tcas.Annotation' )
+    typesystem.add_feature( type_ = NoteSection ,
+                            name = 'SectionNumber' ,
+                            description = '' ,
+                            rangeTypeName = 'uima.cas.Integer' )
+    typesystem.add_feature( type_ = NoteSection ,
+                            name = 'SectionDepth' ,
+                            description = 'Given an hierarchical section schema, how deep is the current section ( 0 = root level/major category)' , 
+                            rangeTypeName = 'uima.cas.Integer' )
+    typesystem.add_feature( type_ = NoteSection ,
+                            name = 'SectionId' ,
+                            description = 'Type (or concept id) of current section' , 
+                            rangeTypeName = 'uima.cas.String' )
+    typesystem.add_feature( type_ = NoteSection ,
+                            name = 'beginHeader' ,
+                            description = 'The start offset for this section\'s header (-1 if no header)' , 
+                            rangeTypeName = 'uima.cas.Integer' )
+    typesystem.add_feature( type_ = NoteSection ,
+                            name = 'endHeader' ,
+                            description = 'The end offset for this section\'s header (-1 if no header)' , 
+                            rangeTypeName = 'uima.cas.Integer' )
+    typesystem.add_feature( type_ = NoteSection ,
+                            name = 'modifiers' ,
+                            description = 'Modifiers (key/value pairs) associated with the given section' , 
+                            rangeTypeName = 'uima.cas.String' )
     ## Iterate over the files, covert to CAS, and write the XMI to disk
     filenames = df["filename"].unique()
     for filename in filenames:
         df_byfilename = raw_features[raw_features["filename"]==filename]
 
-        cas = cassis.Cas(typesystem=typesystem)
+        cas = cassis.Cas( typesystem = typesystem )
         cas.sofa_mime = "text/plain"
         s = ""
-        cas.sofa_string = s.join(df_byfilename["content"].tolist())
-        for i in range(len(df_byfilename)):
-            cas.add_annotation(SentAnnotation(begin=df_byfilename["idx1"].iloc[i],
-                                           end=df_byfilename["idx2"].iloc[i],
-                                           text=df_byfilename["content"].iloc[i],
-                                           isHeader=df_byfilename['isHeader'].iloc[i]))
+        cas.sofa_string = s.join( df_byfilename[ "content" ].tolist() )
+        for i in range( len( df_byfilename ) ):
+            cas.add_annotation( SentenceAnnotation( begin = df_byfilename["idx1"].iloc[i] ,
+                                                    end = df_byfilename["idx2"].iloc[i] ) )
+            if( df_byfilename['isHeader'].iloc[i] ):
+                cas.add_annotation( NoteSection( beginHeader = df_byfilename["idx1"].iloc[i] ,
+                                                 endHeader = df_byfilename["idx2"].iloc[i] ,
+                                                 ##title = df_byfilename["content"].iloc[i] ,
+                                                 begin = df_byfilename["idx1"].iloc[i] ,
+                                                 ## TODO - patch all sections without an official span end
+                                                 ##        to be that of the start of the next NoteSection
+                                                 end = -1 ) )
         # write CAS XMI
         xmi_filename = re.sub('.txt$', '.xmi', filename)
         cas.to_xmi(path=os.path.join(output_dir, xmi_filename), pretty_print=True)
@@ -231,7 +260,7 @@ def train( input_dir, output_dir , model_dir, svm_kernel):
 
 
 
-def annotate( input_dir, output_dir , model_file ):
+def annotate( input_dir, output_dir , model_file , types_dir ):
     raw_features = extract_features( input_dir, training_flag = False )
     predictors = clean_up_features( raw_features , keep_filename = False )
     
@@ -249,7 +278,7 @@ def annotate( input_dir, output_dir , model_file ):
 
     ## Write a CAS XMI file per filename
     assert len(raw_features) == len(y_pred)
-    write_xmi(raw_features, y_pred, output_dir)
+    write_xmi( raw_features , y_pred , output_dir , types_dir )
     print("Annotation completed.")
 
 
@@ -258,6 +287,9 @@ def annotate( input_dir, output_dir , model_file ):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Clincial notes sectionizer based on spaCY basic pipeline and SVM')
+    parser.add_argument( '-t' , '--types-dir' , default = None ,
+                         dest = 'typesDir' ,
+                         help = 'Directory containing the systems files need to be loaded' )
     parser.add_argument( '-i' , '--input-dir' , required = True ,
                          dest = 'input_dir' ,
                          help='Input directory containing plain text (and .ann) files to train or to sectionize')
@@ -290,4 +322,5 @@ if __name__ == '__main__':
         annotate( os.path.abspath( args.input_dir ) ,
                   os.path.abspath( args.output_dir ) ,
                   os.path.join( os.path.abspath( args.model_dir ) ,
-                                'svm_sectionizer.pkl' ) )
+                                'svm_sectionizer.pkl' ) ,
+                 os.path.abspath( args.typesDir ) )
