@@ -10,7 +10,7 @@ from clinical_sectionizer import Sectionizer
 
 import cassis
 
-def main( inputDir , outputDir ):
+def main( inputDir , outputDir , typesDir ):
     ## Load an clinical English medspaCy model trained on i2b2 data
     ## - https://github.com/medspacy/sectionizer/blob/master/notebooks/00-clinical_sectionizer.ipynb
     nlp_pipeline = spacy.load( 'en_info_3700_i2b2_2012' )
@@ -25,7 +25,11 @@ def main( inputDir , outputDir ):
     ## - https://github.com/dkpro/dkpro-cassis/blob/master/cassis/typesystem.py
     ############
     ## ... for tokens
-    typesystem = cassis.TypeSystem()
+    if( typesDir is None ):
+        typesystem = cassis.TypeSystem()
+    else:
+        with open( os.path.join( args.typesDir , 'Sentence.xml' ) , 'rb' ) as fp:
+            typesystem = cassis.load_typesystem( fp )
     TokenAnnotation = typesystem.create_type( name = 'uima.tt.TokenAnnotation' , 
                                               supertypeName = 'uima.tcas.Annotation' )
     typesystem.add_feature( type_ = TokenAnnotation ,
@@ -120,10 +124,23 @@ def main( inputDir , outputDir ):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser( description = 'Simple medspaCy pipeline for splitting a plain text note into sections and writing them out in CAS XMI format' )
-    parser.add_argument( 'inputDir' ,
+    parser.add_argument( '-t' , '--types-dir' , default = None ,
+                         dest = 'typesDir' ,
+                         help = 'Directory containing the systems files need to be loaded' )
+    parser.add_argument( '-i' , '--input-dir' , required = True ,
+                         dest = 'inputDir' ,
                          help = 'Input directory containing plain text files to sectionize' )
-    parser.add_argument( 'outputDir' ,
+    parser.add_argument( '-o' , '--output-dir' , required = True ,
+                         dest = 'outputDir',
                          help = 'Output directory for writing CAS XMI files to' )
     args = parser.parse_args()
+    if( not os.path.exists( args.outputDir ) ):
+        try:
+            os.makedirs( args.outputDir )
+        except OSError as e:
+            log.error( 'OSError caught while trying to create output folder:  {}'.format( e ) )
+        except IOError as e:
+            log.error( 'IOError caught while trying to create output folder:  {}'.format( e ) )
     main( os.path.abspath( args.inputDir ) ,
-          os.path.abspath( args.outputDir ) )
+          os.path.abspath( args.outputDir ) ,
+          os.path.abspath( args.typesDir ) )
